@@ -445,12 +445,22 @@ def create_sg_entities_in_ay(
             sg_enabled_entities
         )
     ]
-    new_task_types = sg_steps + project_entity.task_types
-    new_task_types = list({
-        task['name']: task
-        for task in new_task_types
-    }.values())
-    project_entity.task_types = new_task_types
+    # AYON does not allow multiple task types whose names differ only by
+    # case, so de-duplicate case-insensitively to avoid failing the sync.
+    # NOTE: Existing AYON task types are listed first so they take priority
+    #   over SG steps with the same (case-insensitive) name.
+    new_task_types = project_entity.task_types + sg_steps
+
+    unique_task_types = []
+    seen = set()
+    for task_type in new_task_types:
+        name_key = task_type["name"].lower()
+        if name_key in seen:
+            continue
+        seen.add(name_key)
+        unique_task_types.append(task_type)
+
+    project_entity.task_types = unique_task_types
 
     return sg_folder_entities, sg_steps
 
