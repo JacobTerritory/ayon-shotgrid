@@ -445,12 +445,31 @@ def create_sg_entities_in_ay(
             sg_enabled_entities
         )
     ]
-    new_task_types = sg_steps + project_entity.task_types
-    new_task_types = list({
-        task['name']: task
-        for task in new_task_types
-    }.values())
-    project_entity.task_types = new_task_types
+
+    # Ayon does not allow multiple Task types with the same spelling to be defined.
+    # Ensure that we are checking case-insensitvely before adding a new Task type
+    # to Ayon, to prevent failing the sync.
+    # NOTE: It's also important that the existing Task types are listed first, so 
+    #   that they take Priority. Otherwise, conflicting Task types will take the 
+    #   new name, and cause errors when trying to write the new Task type case to
+    #   the server. 
+    #   Ex:
+    #       ayon_api.exceptions.HTTPRequestError: 409 Client Error: Conflict for 
+    #       url: http://server:5000/api/projects/<proj> (Task_type with 
+    #       lower(name::text) 'lookdev' already exists.)
+    new_task_types = project_entity.task_types + sg_steps
+
+    unique_task_types = []
+    seen = set([])
+
+    for task_type in new_task_types:
+        if task_type["name"].lower() in seen:
+            continue
+
+        seen.add(task_type["name"].lower())
+        unique_task_types.append(task_type)
+
+    project_entity.task_types = unique_task_types
 
     return sg_folder_entities, sg_steps
 
