@@ -1943,6 +1943,12 @@ def _get_sg_note_parent_entity(entity_hub, sg_note, sg_session):
             log.debug("Skipping unsupported Playlist link in SG note.")
             continue
 
+        # AYON activities (comments) cannot be attached to a project,
+        # only to folders, tasks, products and versions.
+        if link["type"] == "Project":
+            log.debug("Skipping Project link in SG note.")
+            continue
+
         if not sg_entity.get(CUST_FIELD_CODE_ID):
             log.warning(f"Entity in SG with '{sg_id}' "
                         "not synced to AYON yet.")
@@ -1977,11 +1983,14 @@ def _get_sg_note_parent_entity(entity_hub, sg_note, sg_session):
     # AYON comment are only parented to one folder (and not a task).
     # Figure out the most relevant parent from multiple links
     def _order_by_parent_relevance(parent):
-        parent_type =(
+        parent_type = (
             parent.folder_type
             if hasattr(parent, "folder_type")
             else parent.entity_type
         )
+        # Folder types are capitalized (e.g. "Shot") while the
+        # parenting order is lowercase.
+        parent_type = (parent_type or "").lower()
 
         try:
             return COMMENTS_PARENTING_ORDER.index(parent_type)
