@@ -1243,12 +1243,33 @@ def get_sg_statuses(
             status_field = "sg_status_list"
         try:
             entity_status = sg_session.schema_field_read(sg_entity_type, status_field)
-            sg_statuses = entity_status[status_field]["properties"]["display_values"]["value"]
         except shotgun_api3.shotgun.Fault:
             log.warning(
                 f"Unable to get status field '{status_field}' for {sg_entity_type} "
                 "in Flow."
             )
+            return sg_statuses
+
+        field_schema = entity_status.get(status_field, {})
+        data_type = field_schema.get("data_type", {}).get("value")
+        properties = field_schema.get("properties", {})
+
+        # Only status list fields carry status codes and their display names.
+        # Some entity types have a field with this name that is not a status
+        # list (or a status list without display values), skip those.
+        if data_type != "status_list":
+            log.warning(
+                f"Field '{status_field}' on {sg_entity_type} is of type "
+                f"'{data_type}', not a status list. Skipping its statuses."
+            )
+            return sg_statuses
+
+        sg_statuses = properties.get("display_values", {}).get("value") or {}
+        if not sg_statuses:
+            # Fall back to the status codes, using each code as its name.
+            valid_values = properties.get("valid_values", {}).get("value") or []
+            sg_statuses = {code: code for code in valid_values}
+
         return sg_statuses
 
     sg_statuses = {
