@@ -838,10 +838,17 @@ def get_sg_entities(
         if entity_name == "Reply":  # Reply doesn't have link to project
             continue
 
+        # The parent field comes from the project's Tracking Settings and
+        # can be a custom field (e.g. 'sg_asset_group'), so make sure it is
+        # queried along with the common fields.
+        entity_query_fields = list(query_fields)
+        if parent_field != "project" and parent_field not in query_fields:
+            entity_query_fields.append(parent_field)
+
         sg_entities = sg_session.find(
             entity_name,
             filters=[["project", "is", sg_project]],
-            fields=query_fields,
+            fields=entity_query_fields,
         )
 
         for sg_entity in sg_entities:
@@ -849,8 +856,8 @@ def get_sg_entities(
 
             if (
                 parent_field != "project"
-                and sg_entity[parent_field]
                 and entity_name != "Asset"
+                and sg_entity.get(parent_field)
             ):
 
                 sg_parent = sg_entity[parent_field]
