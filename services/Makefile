@@ -1,4 +1,4 @@
-ADDON_VERSION := $(shell grep "version" ../package.py | cut -d' ' -f3 | tr -d '"')
+ADDON_VERSION := $(shell grep "^version" ../package.py | cut -d' ' -f3 | tr -d '"')
 IMAGE := ynput/ayon-shotgrid-$(SERVICE):$(ADDON_VERSION)
 SERVICE = $(error Please specify the service to build with 'SERVICE', for example: 'make build SERVICE=leecher')
 
