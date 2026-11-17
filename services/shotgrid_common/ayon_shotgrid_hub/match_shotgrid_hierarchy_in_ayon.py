@@ -148,7 +148,15 @@ def match_shotgrid_hierarchy_in_ayon(
                 shotgrid_type,
                 sg_enabled_entities,
             )
-            asset_category_parent = sg_parent_field == "sg_asset_type"
+            # Assets are placed under their AssetCategory folder (built from
+            # 'sg_asset_type') whatever the Tracking Settings parent field is
+            # (e.g. a custom 'sg_asset_group'). The category itself is
+            # re-parented, so the asset must not be moved again.
+            asset_category_parent = (
+                sg_parent_field == "sg_asset_type"
+                or getattr(ay_parent_entity, "folder_type", None)
+                == "AssetCategory"
+            )
 
             if (
                 shotgrid_type == "Asset"
