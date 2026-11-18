@@ -1504,6 +1504,22 @@ def update_ay_entity_custom_attributes(
             ay_entity.attribs.set(ay_attrib, attrib_value)
 
 
+def _resolve_ayon_task_type(entity_hub, sg_task_type):
+    """Return the AYON task type matching a SG Step code, ignoring case.
+
+    Task types are de-duplicated case-insensitively when SG Steps are added
+    to the project (see `create_sg_entities_in_ay`), so an existing AYON
+    type such as 'Lookdev' is kept instead of the SG Step 'LookDev'. Tasks
+    must use that spelling or the server rejects them.
+    """
+    if not sg_task_type:
+        return sg_task_type
+    for task_type in entity_hub.project_entity.task_types:
+        if task_type["name"].lower() == sg_task_type.lower():
+            return task_type["name"]
+    return sg_task_type
+
+
 def create_new_ayon_entity(
     sg_session: shotgun_api3.Shotgun,
     entity_hub: ayon_api.entity_hub.EntityHub,
@@ -1556,7 +1572,8 @@ def create_new_ayon_entity(
             return
 
         ay_entity = entity_hub.add_new_task(
-            task_type=sg_ay_dict["task_type"],
+            task_type=_resolve_ayon_task_type(
+                entity_hub, sg_ay_dict["task_type"]),
             name=sg_ay_dict["name"],
             label=sg_ay_dict["label"],
             entity_id=sg_ay_dict["data"][CUST_FIELD_CODE_ID],
