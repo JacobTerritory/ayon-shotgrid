@@ -72,6 +72,10 @@ def match_shotgrid_hierarchy_in_ayon(
 
     sg_project_sync_status = "Synced"
     processed_ids = set()
+    # Notes are synced after the hierarchy is committed: their parent
+    # folders/tasks must exist on the server, and SG must already hold
+    # the (possibly new) AYON ids of the entities they are linked to.
+    deferred_comments = []
 
     while sg_ay_dicts_deck:
         (ay_parent_entity, sg_ay_dict_child_id) = sg_ay_dicts_deck.popleft()
@@ -91,14 +95,7 @@ def match_shotgrid_hierarchy_in_ayon(
         log.debug(f"Deck size: {len(sg_ay_dicts_deck)}")
 
         if sg_ay_dict["type"].lower() == "comment":
-            try:
-                handle_comment(sg_ay_dict, sg_session, entity_hub)
-            except Exception as exc:
-                log.error(
-                    "Unable to sync SG note '%s' as AYON comment: %s",
-                    sg_entity_id,
-                    exc,
-                )
+            deferred_comments.append((sg_entity_id, sg_ay_dict))
             continue
 
         if sg_ay_dict["type"].lower() == "entity_list":
@@ -227,6 +224,16 @@ def match_shotgrid_hierarchy_in_ayon(
     except Exception:
         log.error(
             "Unable to commit all entities to AYON!", exc_info=True)
+
+    for sg_entity_id, sg_ay_dict in deferred_comments:
+        try:
+            handle_comment(sg_ay_dict, sg_session, entity_hub)
+        except Exception as exc:
+            log.error(
+                "Unable to sync SG note '%s' as AYON comment: %s",
+                sg_entity_id,
+                exc,
+            )
 
     log.info(
         "Processed entities successfully!. "
