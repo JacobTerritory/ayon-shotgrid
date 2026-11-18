@@ -304,6 +304,10 @@ def _update_sg_entity(
         sg_entity_sync_status (str): 'Synched'|'Failed'
         sg_session (shotgun_api3.Shotgun):
     """
+    # Compare against the AYON id stored in SG *before* overwriting it,
+    # otherwise a stale id (e.g. after the AYON entity was deleted and
+    # recreated) is never written back to SG.
+    stored_ayon_id = sg_ay_dict["data"].get(CUST_FIELD_CODE_ID)
     sg_ay_dict["data"][CUST_FIELD_CODE_ID] = ay_entity.id
     sg_ay_dicts[sg_entity_id] = sg_ay_dict
 
@@ -314,7 +318,7 @@ def _update_sg_entity(
             "Folder", "AssetCategory"
         ]
         and (
-            sg_ay_dict["data"][CUST_FIELD_CODE_ID] != ay_entity.id or
+            stored_ayon_id != ay_entity.id or
             sg_ay_dict["data"][CUST_FIELD_CODE_SYNC] != sg_entity_sync_status
         )
     ):
