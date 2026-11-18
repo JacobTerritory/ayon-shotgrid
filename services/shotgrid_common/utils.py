@@ -445,12 +445,22 @@ def create_sg_entities_in_ay(
             sg_enabled_entities
         )
     ]
-    new_task_types = sg_steps + project_entity.task_types
-    new_task_types = list({
-        task['name']: task
-        for task in new_task_types
-    }.values())
-    project_entity.task_types = new_task_types
+    # AYON does not allow multiple task types whose names differ only by
+    # case, so de-duplicate case-insensitively to avoid failing the sync.
+    # NOTE: Existing AYON task types are listed first so they take priority
+    #   over SG steps with the same (case-insensitive) name.
+    new_task_types = project_entity.task_types + sg_steps
+
+    unique_task_types = []
+    seen = set()
+    for task_type in new_task_types:
+        name_key = task_type["name"].lower()
+        if name_key in seen:
+            continue
+        seen.add(name_key)
+        unique_task_types.append(task_type)
+
+    project_entity.task_types = unique_task_types
 
     return sg_folder_entities, sg_steps
 
@@ -828,10 +838,17 @@ def get_sg_entities(
         if entity_name == "Reply":  # Reply doesn't have link to project
             continue
 
+        # The parent field comes from the project's Tracking Settings and
+        # can be a custom field (e.g. 'sg_asset_group'), so make sure it is
+        # queried along with the common fields.
+        entity_query_fields = list(query_fields)
+        if parent_field != "project" and parent_field not in query_fields:
+            entity_query_fields.append(parent_field)
+
         sg_entities = sg_session.find(
             entity_name,
             filters=[["project", "is", sg_project]],
-            fields=query_fields,
+            fields=entity_query_fields,
         )
 
         for sg_entity in sg_entities:
@@ -839,8 +856,8 @@ def get_sg_entities(
 
             if (
                 parent_field != "project"
-                and sg_entity[parent_field]
                 and entity_name != "Asset"
+                and sg_entity.get(parent_field)
             ):
 
                 sg_parent = sg_entity[parent_field]
@@ -1233,12 +1250,33 @@ def get_sg_statuses(
             status_field = "sg_status_list"
         try:
             entity_status = sg_session.schema_field_read(sg_entity_type, status_field)
-            sg_statuses = entity_status[status_field]["properties"]["display_values"]["value"]
         except shotgun_api3.shotgun.Fault:
             log.warning(
                 f"Unable to get status field '{status_field}' for {sg_entity_type} "
                 "in Flow."
             )
+            return sg_statuses
+
+        field_schema = entity_status.get(status_field, {})
+        data_type = field_schema.get("data_type", {}).get("value")
+        properties = field_schema.get("properties", {})
+
+        # Only status list fields carry status codes and their display names.
+        # Some entity types have a field with this name that is not a status
+        # list (or a status list without display values), skip those.
+        if data_type != "status_list":
+            log.warning(
+                f"Field '{status_field}' on {sg_entity_type} is of type "
+                f"'{data_type}', not a status list. Skipping its statuses."
+            )
+            return sg_statuses
+
+        sg_statuses = properties.get("display_values", {}).get("value") or {}
+        if not sg_statuses:
+            # Fall back to the status codes, using each code as its name.
+            valid_values = properties.get("valid_values", {}).get("value") or []
+            sg_statuses = {code: code for code in valid_values}
+
         return sg_statuses
 
     sg_statuses = {
@@ -1466,6 +1504,22 @@ def update_ay_entity_custom_attributes(
             ay_entity.attribs.set(ay_attrib, attrib_value)
 
 
+def _resolve_ayon_task_type(entity_hub, sg_task_type):
+    """Return the AYON task type matching a SG Step code, ignoring case.
+
+    Task types are de-duplicated case-insensitively when SG Steps are added
+    to the project (see `create_sg_entities_in_ay`), so an existing AYON
+    type such as 'Lookdev' is kept instead of the SG Step 'LookDev'. Tasks
+    must use that spelling or the server rejects them.
+    """
+    if not sg_task_type:
+        return sg_task_type
+    for task_type in entity_hub.project_entity.task_types:
+        if task_type["name"].lower() == sg_task_type.lower():
+            return task_type["name"]
+    return sg_task_type
+
+
 def create_new_ayon_entity(
     sg_session: shotgun_api3.Shotgun,
     entity_hub: ayon_api.entity_hub.EntityHub,
@@ -1518,7 +1572,8 @@ def create_new_ayon_entity(
             return
 
         ay_entity = entity_hub.add_new_task(
-            task_type=sg_ay_dict["task_type"],
+            task_type=_resolve_ayon_task_type(
+                entity_hub, sg_ay_dict["task_type"]),
             name=sg_ay_dict["name"],
             label=sg_ay_dict["label"],
             entity_id=sg_ay_dict["data"][CUST_FIELD_CODE_ID],
@@ -1905,6 +1960,12 @@ def _get_sg_note_parent_entity(entity_hub, sg_note, sg_session):
             log.debug("Skipping unsupported Playlist link in SG note.")
             continue
 
+        # AYON activities (comments) cannot be attached to a project,
+        # only to folders, tasks, products and versions.
+        if link["type"] == "Project":
+            log.debug("Skipping Project link in SG note.")
+            continue
+
         if not sg_entity.get(CUST_FIELD_CODE_ID):
             log.warning(f"Entity in SG with '{sg_id}' "
                         "not synced to AYON yet.")
@@ -1939,11 +2000,14 @@ def _get_sg_note_parent_entity(entity_hub, sg_note, sg_session):
     # AYON comment are only parented to one folder (and not a task).
     # Figure out the most relevant parent from multiple links
     def _order_by_parent_relevance(parent):
-        parent_type =(
+        parent_type = (
             parent.folder_type
             if hasattr(parent, "folder_type")
             else parent.entity_type
         )
+        # Folder types are capitalized (e.g. "Shot") while the
+        # parenting order is lowercase.
+        parent_type = (parent_type or "").lower()
 
         try:
             return COMMENTS_PARENTING_ORDER.index(parent_type)

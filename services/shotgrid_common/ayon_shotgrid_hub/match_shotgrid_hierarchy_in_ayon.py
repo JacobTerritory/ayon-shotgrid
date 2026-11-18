@@ -72,6 +72,10 @@ def match_shotgrid_hierarchy_in_ayon(
 
     sg_project_sync_status = "Synced"
     processed_ids = set()
+    # Notes are synced after the hierarchy is committed: their parent
+    # folders/tasks must exist on the server, and SG must already hold
+    # the (possibly new) AYON ids of the entities they are linked to.
+    deferred_comments = []
 
     while sg_ay_dicts_deck:
         (ay_parent_entity, sg_ay_dict_child_id) = sg_ay_dicts_deck.popleft()
@@ -91,14 +95,7 @@ def match_shotgrid_hierarchy_in_ayon(
         log.debug(f"Deck size: {len(sg_ay_dicts_deck)}")
 
         if sg_ay_dict["type"].lower() == "comment":
-            try:
-                handle_comment(sg_ay_dict, sg_session, entity_hub)
-            except Exception as exc:
-                log.error(
-                    "Unable to sync SG note '%s' as AYON comment: %s",
-                    sg_entity_id,
-                    exc,
-                )
+            deferred_comments.append((sg_entity_id, sg_ay_dict))
             continue
 
         if sg_ay_dict["type"].lower() == "entity_list":
@@ -148,7 +145,15 @@ def match_shotgrid_hierarchy_in_ayon(
                 shotgrid_type,
                 sg_enabled_entities,
             )
-            asset_category_parent = sg_parent_field == "sg_asset_type"
+            # Assets are placed under their AssetCategory folder (built from
+            # 'sg_asset_type') whatever the Tracking Settings parent field is
+            # (e.g. a custom 'sg_asset_group'). The category itself is
+            # re-parented, so the asset must not be moved again.
+            asset_category_parent = (
+                sg_parent_field == "sg_asset_type"
+                or getattr(ay_parent_entity, "folder_type", None)
+                == "AssetCategory"
+            )
 
             if (
                 shotgrid_type == "Asset"
@@ -219,6 +224,16 @@ def match_shotgrid_hierarchy_in_ayon(
     except Exception:
         log.error(
             "Unable to commit all entities to AYON!", exc_info=True)
+
+    for sg_entity_id, sg_ay_dict in deferred_comments:
+        try:
+            handle_comment(sg_ay_dict, sg_session, entity_hub)
+        except Exception as exc:
+            log.error(
+                "Unable to sync SG note '%s' as AYON comment: %s",
+                sg_entity_id,
+                exc,
+            )
 
     log.info(
         "Processed entities successfully!. "
@@ -296,6 +311,10 @@ def _update_sg_entity(
         sg_entity_sync_status (str): 'Synched'|'Failed'
         sg_session (shotgun_api3.Shotgun):
     """
+    # Compare against the AYON id stored in SG *before* overwriting it,
+    # otherwise a stale id (e.g. after the AYON entity was deleted and
+    # recreated) is never written back to SG.
+    stored_ayon_id = sg_ay_dict["data"].get(CUST_FIELD_CODE_ID)
     sg_ay_dict["data"][CUST_FIELD_CODE_ID] = ay_entity.id
     sg_ay_dicts[sg_entity_id] = sg_ay_dict
 
@@ -306,7 +325,7 @@ def _update_sg_entity(
             "Folder", "AssetCategory"
         ]
         and (
-            sg_ay_dict["data"][CUST_FIELD_CODE_ID] != ay_entity.id or
+            stored_ayon_id != ay_entity.id or
             sg_ay_dict["data"][CUST_FIELD_CODE_SYNC] != sg_entity_sync_status
         )
     ):
