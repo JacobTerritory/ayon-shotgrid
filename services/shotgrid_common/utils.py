@@ -491,10 +491,11 @@ def get_reparenting_from_settings(entity_hub, sg_ay_dict, addon_settings):
 
     sg_type = sg_ay_dict["folder_type"]
 
-    # AssetCategory is an AYON specific entity type.
-    # Apply same logic as Asset when reparenting from SG.
+    # AssetCategory is an AYON specific entity type. It follows the preset
+    # of the entity type it groups (e.g. 'gfx' built from a custom entity's
+    # 'sg_type' uses that custom entity's preset), Asset by default.
     if sg_type == "AssetCategory":
-        sg_type = "Asset"
+        sg_type = sg_ay_dict.get("category_of") or "Asset"
 
     folders_and_types = _get_parents_and_types(
         addon_settings,
@@ -514,10 +515,19 @@ def get_reparenting_from_settings(entity_hub, sg_ay_dict, addon_settings):
     )
 
 
-# ShotGrid entity types the folder re-parenting presets can apply to.
+# ShotGrid entity types the folder re-parenting presets can apply to,
+# besides project custom entities (see `is_reparentable_sg_type`).
 REPARENTING_SG_TYPES = (
     "Sequence", "Episode", "Shot", "AssetCategory", "Asset",
 )
+
+
+def is_reparentable_sg_type(sg_type):
+    """Whether folder re-parenting presets can apply to `sg_type`."""
+    return (
+        sg_type in REPARENTING_SG_TYPES
+        or (sg_type or "").startswith("CustomEntity")
+    )
 
 
 def should_apply_reparenting(entity_hub, natural_parent, addon_settings):
@@ -854,11 +864,13 @@ def get_asset_category_value(value):
 
 
 def _add_asset_category(category, sg_project, sg_ay_dicts,
-                        sg_ay_dicts_parents):
+                        sg_ay_dicts_parents, category_of="Asset"):
     """Add an AssetCategory folder under the project, return its key.
 
     Asset Categories (e.g. 'sg_asset_type') are not entities (or at least
     aren't queryable) in ShotGrid, thus here we create common folders.
+    `category_of` is the ShotGrid entity type being grouped; its folder
+    re-parenting preset is used for the category.
     """
     cat_ent_name = slugify_string(category).lower()
     if cat_ent_name not in sg_ay_dicts:
@@ -875,6 +887,7 @@ def _add_asset_category(category, sg_project, sg_ay_dicts,
             },
             "type": "folder",
             "folder_type": "AssetCategory",
+            "category_of": category_of,
         }
         sg_ay_dicts_parents[sg_project["id"]].add(cat_ent_name)
     return cat_ent_name
@@ -1013,6 +1026,7 @@ def get_sg_entities(
                         sg_project,
                         sg_ay_dicts,
                         sg_ay_dicts_parents,
+                        category_of=entity_name,
                     )
                 elif category_field["skip_when_empty"]:
                     log.warning(

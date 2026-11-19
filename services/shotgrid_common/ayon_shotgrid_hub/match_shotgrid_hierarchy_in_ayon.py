@@ -19,7 +19,7 @@ from utils import (
     get_sg_entities,
     get_reparenting_from_settings,
     should_apply_reparenting,
-    REPARENTING_SG_TYPES,
+    is_reparentable_sg_type,
     update_ay_entity_custom_attributes, handle_comment,
 )
 
@@ -141,7 +141,7 @@ def match_shotgrid_hierarchy_in_ayon(
         if ay_entity is None:
 
             if (
-                shotgrid_type in REPARENTING_SG_TYPES
+                is_reparentable_sg_type(shotgrid_type)
                 and should_apply_reparenting(
                     entity_hub, ay_parent_entity, addon_settings)
             ):

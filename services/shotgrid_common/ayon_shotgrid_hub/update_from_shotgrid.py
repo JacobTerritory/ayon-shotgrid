@@ -41,7 +41,7 @@ from utils import (
     get_asset_category_fields,
     get_asset_category_value,
     should_apply_reparenting,
-    REPARENTING_SG_TYPES,
+    is_reparentable_sg_type,
     update_ay_entity_custom_attributes,
     handle_comment,
     handle_reply,
@@ -371,16 +371,21 @@ def _get_parent_query_fields(sg_type, sg_parent_field, category_fields):
 
 
 def _get_or_create_asset_category(
-    ayon_entity_hub, sg_session, category, addon_settings
+    ayon_entity_hub, sg_session, category, addon_settings,
+    category_of="Asset",
 ):
-    """Find or create the AssetCategory folder for `category`."""
+    """Find or create the AssetCategory folder for `category`.
+
+    `category_of` is the ShotGrid entity type being grouped; its folder
+    re-parenting preset decides where the category goes.
+    """
     category_parent = ayon_entity_hub.project_entity
     if should_apply_reparenting(
         ayon_entity_hub, category_parent, addon_settings
     ):
         category_parent = get_reparenting_from_settings(
             ayon_entity_hub,
-            {"folder_type": "AssetCategory"},
+            {"folder_type": "AssetCategory", "category_of": category_of},
             addon_settings,
         ) or category_parent
 
@@ -498,7 +503,8 @@ def _get_ayon_parent_entity(
             sg_ay_dict["data"].get(category_field["sg_field"]))
         if category:
             return _get_or_create_asset_category(
-                ayon_entity_hub, sg_session, category, addon_settings)
+                ayon_entity_hub, sg_session, category, addon_settings,
+                category_of=shotgrid_type)
         if category_field["skip_when_empty"]:
             raise SkipSgEntity(
                 f"field '{category_field['sg_field']}' is empty")
@@ -507,7 +513,7 @@ def _get_ayon_parent_entity(
     log.debug(f"ShotGrid Parent is the Project: {sg_project}")
     ay_parent_entity = ayon_entity_hub.project_entity
     if (
-        shotgrid_type in REPARENTING_SG_TYPES
+        is_reparentable_sg_type(shotgrid_type)
         and should_apply_reparenting(
             ayon_entity_hub, ay_parent_entity, addon_settings)
     ):

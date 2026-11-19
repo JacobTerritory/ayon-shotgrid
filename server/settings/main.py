@@ -48,13 +48,17 @@ def default_shotgrid_enabled_entities():
 
 
 def default_shotgrid_reparenting_entities():
-    """The entity types in ShotGrid that are enabled by default in AYON."""
+    """The ShotGrid entity types folder re-parenting presets can target.
+
+    A preset for an entity type also moves the AssetCategory folders built
+    for that type (see 'AssetCategory fields').
+    """
     return [
         "Episode",
         "Sequence",
         "Shot",
         "Asset",
-    ]
+    ] + [f"CustomEntity{index:02d}" for index in range(1, 51)]
 
 
 def get_default_folder_attributes():

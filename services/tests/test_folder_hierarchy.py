@@ -184,3 +184,90 @@ def test_category_dict_shape():
     assert dicts[key]["attribs"][SHOTGRID_TYPE_ATTRIB] == "AssetCategory"
     assert dicts[key]["label"] == "Screen GFX"
     assert key in parents[1]
+
+
+class _FakeFolder:
+    def __init__(self, name, folder_type, parent, folder_id):
+        self.name = name
+        self.folder_type = folder_type
+        self.parent = parent
+        self.id = folder_id
+        self.children = []
+        if parent is not None:
+            parent.children.append(self)
+
+    def get_children(self):
+        return self.children
+
+    @property
+    def path(self):
+        if self.parent is None:
+            return ""
+        return f"{self.parent.path}/{self.name}"
+
+
+class _FakeHub:
+    """Just enough of EntityHub for folder re-parenting."""
+
+    def __init__(self):
+        self.project_entity = _FakeFolder("project", None, None, "p")
+        self._by_id = {"p": self.project_entity}
+
+    def add_new_folder(self, folder_type, name, parent_id, **kwargs):
+        folder = _FakeFolder(
+            name, folder_type, self._by_id[parent_id], f"f{len(self._by_id)}")
+        self._by_id[folder.id] = folder
+        return folder
+
+
+def _relocate_settings(*presets):
+    return {"compatibility_settings": {"folder_parenting": {
+        "root_relocate": {"enabled": True, "presets": [
+            {"filter_by_sg_entity_type": sg_type,
+             "parents": [{"folder_type": "Folder", "folder_name": root}]}
+            for sg_type, root in presets
+        ]},
+        "type_grouping": {"enabled": False, "presets": []},
+    }}}
+
+
+def _relocated_path(hub, sg_ay_dict, settings):
+    parent = utils.get_reparenting_from_settings(hub, sg_ay_dict, settings)
+    return parent.path if parent else None
+
+
+def test_category_follows_preset_of_grouped_entity_type():
+    settings = _relocate_settings(
+        ("CustomEntity04", "assets"), ("Asset", "loose_assets"))
+    hub = _FakeHub()
+
+    master_type = {"folder_type": "AssetCategory",
+                   "category_of": "CustomEntity04"}
+    asset_type = {"folder_type": "AssetCategory", "category_of": "Asset"}
+    legacy = {"folder_type": "AssetCategory"}  # no category_of: Asset
+
+    assert _relocated_path(hub, master_type, settings) == "/assets"
+    assert _relocated_path(hub, asset_type, settings) == "/loose_assets"
+    assert _relocated_path(hub, legacy, settings) == "/loose_assets"
+
+
+def test_custom_entity_preset_like_sequence():
+    # Without an AssetCategory field the Master Asset is top-level and is
+    # moved by its own preset, the same way a Sequence is.
+    settings = _relocate_settings(("CustomEntity04", "assets"))
+    hub = _FakeHub()
+    assert utils.is_reparentable_sg_type("CustomEntity04")
+    assert utils.should_apply_reparenting(hub, hub.project_entity, settings)
+    master = {"folder_type": "CustomEntity04"}
+    assert _relocated_path(hub, master, settings) == "/assets"
+
+
+def test_master_asset_category_records_its_entity_type():
+    master = _entity("CustomEntity04", 10, "KyleLaptop", sg_type="gfx")
+    sg = FakeShotgrid(
+        navchains={"CustomEntity04": "sg_type"},
+        entities={"CustomEntity04": [master]},
+    )
+    dicts, _ = _get_entities(
+        sg, MASTER_ASSET_SETTINGS, ["Project", "CustomEntity04"])
+    assert dicts["gfx"]["category_of"] == "CustomEntity04"
