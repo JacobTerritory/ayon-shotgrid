@@ -11,6 +11,7 @@ from utils import (
     get_sg_statuses,
     get_sg_tags,
     get_sg_custom_attributes_data,
+    get_sg_entity_type,
     create_new_sg_entity
 )
 from constants import (
@@ -80,7 +81,9 @@ def create_sg_entity_from_ayon_event(
         elif ay_entity.entity_type == "version":
             sg_type = "Version"
         else:
-            sg_type = ay_entity.folder_type
+            sg_type = get_sg_entity_type(
+                ay_entity.folder_type, addon_settings
+            ) or ay_entity.folder_type
 
     sg_entity = None
 

@@ -20,7 +20,8 @@ from constants import (
     SHOTGRID_ID_ATTRIB,
     SHOTGRID_TYPE_ATTRIB,
     AYON_SHOTGRID_ENTITY_TYPE_MAP,
-    COMMENTS_PARENTING_ORDER
+    COMMENTS_PARENTING_ORDER,
+    FOLDER_REPARENTING_TYPE,
 )
 
 from ayon_api.entity_hub import (
@@ -381,6 +382,7 @@ def create_sg_entities_in_ay(
     sg_session: shotgun_api3.Shotgun,
     shotgrid_project: dict,
     sg_enabled_entities: list,
+    addon_settings: Optional[dict] = None,
 ):
     """Ensure AYON has all the SG Steps (to use as task types) and Folder types.
 
@@ -389,6 +391,8 @@ def create_sg_entities_in_ay(
         sg_session (shotgun_api3.Shotgun): Shotgun Session object.
         shotgrid_project (dict): The project owning the Tasks.
         sg_enabled_entities (list): The enabled entities.
+        addon_settings (Optional[dict]): Addon settings, used for the
+            'Folder type mapping'.
     """
 
     # Types of SG entities to ignore as AYON folders
@@ -396,7 +400,7 @@ def create_sg_entities_in_ay(
 
     # Find ShotGrid Entities that are to be treated as folders
     sg_folder_entities = [
-        {"name": entity_type}
+        {"name": get_ay_folder_type(entity_type, addon_settings)}
         for entity_type, _ in get_sg_project_enabled_entities(
             sg_session,
             shotgrid_project,
@@ -508,6 +512,36 @@ def get_reparenting_from_settings(entity_hub, sg_ay_dict, addon_settings):
         sg_ay_dict,
         folders_and_types=folders_and_types
     )
+
+
+# ShotGrid entity types the folder re-parenting presets can apply to.
+REPARENTING_SG_TYPES = (
+    "Sequence", "Episode", "Shot", "AssetCategory", "Asset",
+)
+
+
+def should_apply_reparenting(entity_hub, natural_parent, addon_settings):
+    """Whether folder re-parenting settings apply under `natural_parent`.
+
+    `natural_parent` is where the entity would go from the ShotGrid
+    hierarchy alone.
+
+    - Entities grouped under an AssetCategory stay there; the category
+      itself is the folder that gets re-parented.
+    - 'Root relocation' keeps the ShotGrid hierarchy and only moves the
+      folders that would sit directly under the project, so nested
+      entities (Shot under Sequence, Asset under a parent entity) follow
+      their parent instead of being moved on their own.
+    """
+    if getattr(natural_parent, "folder_type", None) == "AssetCategory":
+        return False
+    transfer_type = _get_parenting_transfer_type(addon_settings)
+    if (
+        transfer_type == FOLDER_REPARENTING_TYPE.ROOT_RELOCATE
+        and natural_parent is not entity_hub.project_entity
+    ):
+        return False
+    return True
 
 
 def _get_special_category(
@@ -759,6 +793,93 @@ def check_sg_attribute_exists(
     return False
 
 
+def get_folder_type_mapping(addon_settings):
+    """Return {ShotGrid entity type: AYON folder type} from settings.
+
+    Entity types that are not listed keep their ShotGrid name.
+    """
+    compatibility = (addon_settings or {}).get("compatibility_settings", {})
+    return {
+        entry["sg_entity_type"]: entry["ayon_folder_type"]
+        for entry in compatibility.get("folder_type_mapping", [])
+        if entry.get("sg_entity_type") and entry.get("ayon_folder_type")
+    }
+
+
+def get_ay_folder_type(sg_entity_type, addon_settings):
+    """AYON folder type for a ShotGrid entity type (e.g. 'CustomEntity04')."""
+    return get_folder_type_mapping(addon_settings).get(
+        sg_entity_type, sg_entity_type)
+
+
+def get_sg_entity_type(ay_folder_type, addon_settings):
+    """ShotGrid entity type for an AYON folder type, or None if unmapped."""
+    for sg_type, ay_type in get_folder_type_mapping(addon_settings).items():
+        if ay_type == ay_folder_type:
+            return sg_type
+    return None
+
+
+def get_asset_category_fields(addon_settings):
+    """Return {ShotGrid entity type: AssetCategory field settings}.
+
+    Defaults to grouping Assets by 'sg_asset_type' when the settings do not
+    define the list (older settings), matching the previous behaviour.
+    """
+    compatibility = (addon_settings or {}).get("compatibility_settings", {})
+    entries = compatibility.get("asset_category_fields")
+    if entries is None:
+        entries = [{
+            "sg_entity_type": "Asset",
+            "sg_field": "sg_asset_type",
+            "skip_when_empty": False,
+        }]
+    return {
+        entry["sg_entity_type"]: {
+            "sg_field": entry["sg_field"],
+            "skip_when_empty": entry.get("skip_when_empty", False),
+        }
+        for entry in entries
+        if entry.get("sg_entity_type") and entry.get("sg_field")
+    }
+
+
+def get_asset_category_value(value):
+    """Category name from a ShotGrid field value (text, list or entity)."""
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("code")
+    if isinstance(value, str):
+        value = value.strip()
+    return value or None
+
+
+def _add_asset_category(category, sg_project, sg_ay_dicts,
+                        sg_ay_dicts_parents):
+    """Add an AssetCategory folder under the project, return its key.
+
+    Asset Categories (e.g. 'sg_asset_type') are not entities (or at least
+    aren't queryable) in ShotGrid, thus here we create common folders.
+    """
+    cat_ent_name = slugify_string(category).lower()
+    if cat_ent_name not in sg_ay_dicts:
+        sg_ay_dicts[cat_ent_name] = {
+            "label": category,
+            "name": cat_ent_name,
+            "attribs": {
+                SHOTGRID_ID_ATTRIB: cat_ent_name,
+                SHOTGRID_TYPE_ATTRIB: "AssetCategory",
+            },
+            "data": {
+                CUST_FIELD_CODE_ID: None,
+                CUST_FIELD_CODE_SYNC: None,
+            },
+            "type": "folder",
+            "folder_type": "AssetCategory",
+        }
+        sg_ay_dicts_parents[sg_project["id"]].add(cat_ent_name)
+    return cat_ent_name
+
+
 def get_sg_entities(
     sg_session: shotgun_api3.Shotgun,
     sg_project: dict,
@@ -832,6 +953,9 @@ def get_sg_entities(
         collections.defaultdict(set)
     )
 
+    synced_entity_types = {name for name, _ in project_enabled_entities}
+    category_fields = get_asset_category_fields(addon_settings)
+
     for enabled_entity in project_enabled_entities:
         entity_name, parent_field = enabled_entity
 
@@ -840,10 +964,16 @@ def get_sg_entities(
 
         # The parent field comes from the project's Tracking Settings and
         # can be a custom field (e.g. 'sg_asset_group'), so make sure it is
-        # queried along with the common fields.
+        # queried along with the common fields, as is the field used to
+        # build an AssetCategory parent.
         entity_query_fields = list(query_fields)
-        if parent_field != "project" and parent_field not in query_fields:
-            entity_query_fields.append(parent_field)
+        category_field = category_fields.get(entity_name)
+        for field in (
+            parent_field if parent_field != "project" else None,
+            category_field["sg_field"] if category_field else None,
+        ):
+            if field and field not in entity_query_fields:
+                entity_query_fields.append(field)
 
         sg_entities = sg_session.find(
             entity_name,
@@ -853,55 +983,45 @@ def get_sg_entities(
 
         for sg_entity in sg_entities:
             parent_id = sg_project["id"]
+            sg_parent = (
+                sg_entity.get(parent_field)
+                if parent_field != "project" else None
+            )
 
-            if (
-                parent_field != "project"
-                and entity_name != "Asset"
-                and sg_entity.get(parent_field)
+            # Parenting in Project tracking settings can point to a
+            # non-entity entry (e.g. AYON Sync status, or 'sg_asset_type').
+            # Use it only when it links to an entity.
+            linked_parent = (
+                sg_parent
+                if isinstance(sg_parent, dict) and sg_parent.get("id")
+                else None
+            )
+            if linked_parent and (
+                not category_field
+                or linked_parent["type"] in synced_entity_types
             ):
+                parent_id = f'{linked_parent["type"]}_{linked_parent["id"]}'
 
-                sg_parent = sg_entity[parent_field]
-
-                # Parenting in Project tracking settings can
-                # point to a non-entity entry (e.g. AYON Sync status).
-                # Set parent id only if defined parent is a valid entity.
-                if isinstance(sg_parent, dict) and sg_parent.get("id"):
-                    parent_id = sg_parent["id"]
-                    parent_type = sg_parent["type"]
-                    parent_id = f'{parent_type}_{parent_id}'
-
-            # Reparent the current SG Asset under an AssetCategory ?
-            elif (
-                entity_name == "Asset"
-                and sg_entity.get("sg_asset_type")
-            ):
-                # Asset Categories (sg_asset_type) are not entities
-                # (or at least aren't queryable) in ShotGrid
-                # thus here we create common folders.
-                asset_category = sg_entity["sg_asset_type"]
-                # asset category entity name
-                cat_ent_name = slugify_string(asset_category).lower()
-
-                if cat_ent_name not in sg_ay_dicts:
-                    asset_category_entity = {
-                        "label": asset_category,
-                        "name": cat_ent_name,
-                        "attribs": {
-                            SHOTGRID_ID_ATTRIB: slugify_string(
-                                asset_category).lower(),
-                            SHOTGRID_TYPE_ATTRIB: "AssetCategory",
-                        },
-                        "data": {
-                            CUST_FIELD_CODE_ID: None,
-                            CUST_FIELD_CODE_SYNC: None,
-                        },
-                        "type": "folder",
-                        "folder_type": "AssetCategory",
-                    }
-                    sg_ay_dicts[cat_ent_name] = asset_category_entity
-                    sg_ay_dicts_parents[sg_project["id"]].add(cat_ent_name)
-
-                parent_id = cat_ent_name
+            # Not linked to a synced entity: group under an AssetCategory
+            # named after the configured field (Asset -> sg_asset_type).
+            elif category_field:
+                category_value = get_asset_category_value(
+                    sg_entity.get(category_field["sg_field"]))
+                if category_value:
+                    parent_id = _add_asset_category(
+                        category_value,
+                        sg_project,
+                        sg_ay_dicts,
+                        sg_ay_dicts_parents,
+                    )
+                elif category_field["skip_when_empty"]:
+                    log.warning(
+                        "Skipping %s '%s': field '%s' is empty.",
+                        entity_name,
+                        sg_entity.get("code") or sg_entity["id"],
+                        category_field["sg_field"],
+                    )
+                    continue
 
             _add_task_assignees(sg_entity)
 
@@ -1524,7 +1644,8 @@ def create_new_ayon_entity(
     sg_session: shotgun_api3.Shotgun,
     entity_hub: ayon_api.entity_hub.EntityHub,
     parent_entity: Union[ProjectEntity, FolderEntity],
-    sg_ay_dict: Dict
+    sg_ay_dict: Dict,
+    addon_settings: Optional[Dict] = None,
 ):
     """Helper method to create entities in the EntityHub.
 
@@ -1538,6 +1659,8 @@ def create_new_ayon_entity(
         entity_hub (ayon_api.EntityHub): The project's entity hub.
         parent_entity: AYON parent entity.
         sg_ay_dict (dict): AYON ShotGrid entity to create.
+        addon_settings (Optional[dict]): Addon settings, used for the
+            'Folder type mapping'.
 
     Returns:
         FolderEntity|TaskEntity: Added task entity.
@@ -1596,7 +1719,8 @@ def create_new_ayon_entity(
         return
     else:
         ay_entity = entity_hub.add_new_folder(
-            folder_type=sg_ay_dict["folder_type"],
+            folder_type=get_ay_folder_type(
+                sg_ay_dict["folder_type"], addon_settings),
             name=sg_ay_dict["name"],
             label=sg_ay_dict["label"],
             entity_id=sg_ay_dict["data"][CUST_FIELD_CODE_ID],
@@ -1974,6 +2098,11 @@ def _get_sg_note_parent_entity(entity_hub, sg_note, sg_session):
         ay_entity_type = AYON_SHOTGRID_ENTITY_TYPE_MAP.get(
             sg_entity["type"]
         )
+        # Project custom entities are synced as folders.
+        if not ay_entity_type and sg_entity["type"].startswith(
+            "CustomEntity"
+        ):
+            ay_entity_type = "folder"
         if not ay_entity_type:
             log.warning(f"Couldn't find matching entity type in AYON "
                         f"for '{sg_entity['type']}")
@@ -2143,13 +2272,19 @@ def create_new_sg_entity(
         ay_project_name: (str): AYON project name, could be different from
             sg_project
     """
+    mapped_sg_type = None
     if hasattr(ay_entity, "folder_type"):
         sg_type = ay_entity.folder_type
+        mapped_sg_type = get_sg_entity_type(sg_type, addon_settings)
     else:
         sg_type = ay_entity.entity_type
 
     sg_parent_field = get_sg_entity_parent_field(
-        sg_session, sg_project, sg_type.capitalize(), sg_enabled_entities)
+        sg_session,
+        sg_project,
+        mapped_sg_type or sg_type.capitalize(),
+        sg_enabled_entities,
+    )
 
     # generic data
     data = {
@@ -2279,7 +2414,7 @@ def create_new_sg_entity(
 
     # Folder creation
     else:
-        sg_type = ay_entity.folder_type
+        sg_type = mapped_sg_type or ay_entity.folder_type
 
         # If parent field is different than project, add parent field to
         # data dictionary. Each project might have different parent fields

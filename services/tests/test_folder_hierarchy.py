@@ -1,0 +1,186 @@
+"""Folder hierarchy rules: folder type mapping, AssetCategory fields and
+root relocation. Uses a minimal fake ShotGrid session, no server needed.
+"""
+import pytest
+
+import utils
+from constants import SHOTGRID_TYPE_ATTRIB
+
+
+class FakeShotgrid:
+    """Just enough of shotgun_api3.Shotgun for `get_sg_entities`."""
+
+    def __init__(self, navchains, entities):
+        self._navchains = navchains
+        self._entities = entities
+
+    def find_one(self, entity_type, filters, fields=None):
+        return {
+            "type": "Project",
+            "id": 1,
+            "name": "test",
+            "code": "test",
+            "tracking_settings": {"navchains": dict(self._navchains)},
+        }
+
+    def schema_entity_read(self, project_entity=None):
+        return {
+            entity_type: {"visible": {"value": True}}
+            for entity_type in self._entities
+        }
+
+    def find(self, entity_type, filters=None, fields=None):
+        return [dict(e) for e in self._entities.get(entity_type, [])]
+
+
+def _entity(entity_type, entity_id, code, **fields):
+    data = {
+        "type": entity_type,
+        "id": entity_id,
+        "code": code,
+        "project": {"type": "Project", "id": 1},
+        "sg_ayon_id": None,
+        "sg_ayon_sync_status": None,
+    }
+    data.update(fields)
+    return data
+
+
+PROJECT = {"type": "Project", "id": 1, "code": "test", "name": "test"}
+
+MASTER_ASSET_SETTINGS = {
+    "compatibility_settings": {
+        "default_task_type": "Generic",
+        "folder_type_mapping": [
+            {"sg_entity_type": "CustomEntity04",
+             "ayon_folder_type": "MasterAsset"},
+        ],
+        "asset_category_fields": [
+            {"sg_entity_type": "Asset", "sg_field": "sg_asset_type",
+             "skip_when_empty": False},
+            {"sg_entity_type": "CustomEntity04", "sg_field": "sg_type",
+             "skip_when_empty": True},
+        ],
+    }
+}
+
+
+def _get_entities(sg, settings, enabled):
+    return utils.get_sg_entities(
+        sg, PROJECT, enabled, "code", {}, settings)
+
+
+def _parent_of(parents, key):
+    return next(p for p, children in parents.items() if key in children)
+
+
+def test_master_asset_hierarchy():
+    master = _entity("CustomEntity04", 10, "KyleLaptop", sg_type="gfx")
+    untyped = _entity("CustomEntity04", 11, "Untyped", sg_type=None)
+    linked = _entity(
+        "Asset", 20, "KyleLaptop_Screen01", sg_asset_type="screen",
+        sg_asset_group={"type": "CustomEntity04", "id": 10})
+    unlinked = _entity(
+        "Asset", 21, "Loose", sg_asset_type="prop", sg_asset_group=None)
+    sg = FakeShotgrid(
+        navchains={"Asset": "sg_asset_group", "CustomEntity04": "sg_type"},
+        entities={"CustomEntity04": [master, untyped],
+                  "Asset": [linked, unlinked]},
+    )
+
+    dicts, parents = _get_entities(
+        sg, MASTER_ASSET_SETTINGS, ["Project", "CustomEntity04", "Asset"])
+
+    # Master Asset grouped by its own sg_type.
+    assert _parent_of(parents, "CustomEntity04_10") == "gfx"
+    assert dicts["gfx"]["folder_type"] == "AssetCategory"
+    assert "gfx" in parents[1]
+    # Linked Asset goes under its Master Asset, not under 'screen'.
+    assert _parent_of(parents, "Asset_20") == "CustomEntity04_10"
+    assert "screen" not in dicts
+    # Unlinked Asset keeps the previous behaviour (sg_asset_type).
+    assert _parent_of(parents, "Asset_21") == "prop"
+    # Master Asset with an empty sg_type is skipped.
+    assert "CustomEntity04_11" not in dicts
+    # The SG type is kept on the dict; mapping is applied on creation.
+    assert dicts["CustomEntity04_10"]["folder_type"] == "CustomEntity04"
+
+
+def test_default_settings_keep_asset_category_behaviour():
+    asset = _entity("Asset", 20, "Chair", sg_asset_type="prop")
+    sg = FakeShotgrid(
+        navchains={"Asset": "sg_asset_type"},
+        entities={"Asset": [asset]},
+    )
+    # Settings without 'asset_category_fields' (older settings).
+    settings = {"compatibility_settings": {"default_task_type": "Generic"}}
+
+    _, parents = _get_entities(sg, settings, ["Project", "Asset"])
+
+    assert _parent_of(parents, "Asset_20") == "prop"
+    assert "prop" in parents[1]
+
+
+def test_asset_linked_to_unsynced_entity_uses_category():
+    asset = _entity(
+        "Asset", 20, "Chair", sg_asset_type="prop",
+        sg_asset_group={"type": "CustomEntity04", "id": 10})
+    sg = FakeShotgrid(
+        navchains={"Asset": "sg_asset_group"},
+        entities={"Asset": [asset]},
+    )
+    settings = {"compatibility_settings": {"default_task_type": "Generic"}}
+
+    # CustomEntity04 is not enabled, so it cannot be the parent.
+    _, parents = _get_entities(sg, settings, ["Project", "Asset"])
+
+    assert _parent_of(parents, "Asset_20") == "prop"
+
+
+def test_folder_type_mapping():
+    assert utils.get_ay_folder_type(
+        "CustomEntity04", MASTER_ASSET_SETTINGS) == "MasterAsset"
+    assert utils.get_ay_folder_type("Shot", MASTER_ASSET_SETTINGS) == "Shot"
+    assert utils.get_sg_entity_type(
+        "MasterAsset", MASTER_ASSET_SETTINGS) == "CustomEntity04"
+    assert utils.get_sg_entity_type("Shot", MASTER_ASSET_SETTINGS) is None
+    assert utils.get_ay_folder_type("Shot", {}) == "Shot"
+
+
+class _Hub:
+    def __init__(self):
+        self.project_entity = object()
+
+
+class _Folder:
+    def __init__(self, folder_type):
+        self.folder_type = folder_type
+
+
+@pytest.mark.parametrize("mode, parent, expected", [
+    ("root_relocate", "project", True),
+    ("root_relocate", "Sequence", False),
+    ("root_relocate", "AssetCategory", False),
+    ("type_grouping", "Sequence", True),
+    ("type_grouping", "AssetCategory", False),
+])
+def test_should_apply_reparenting(mode, parent, expected):
+    hub = _Hub()
+    natural_parent = (
+        hub.project_entity if parent == "project" else _Folder(parent))
+    settings = {"compatibility_settings": {"folder_parenting": {
+        mode: {"enabled": True, "presets": []},
+    }}}
+    assert utils.should_apply_reparenting(
+        hub, natural_parent, settings) is expected
+
+
+def test_category_dict_shape():
+    dicts, parents = {}, {}
+    import collections
+    parents = collections.defaultdict(set)
+    key = utils._add_asset_category("Screen GFX", PROJECT, dicts, parents)
+    assert key == "screen_gfx"
+    assert dicts[key]["attribs"][SHOTGRID_TYPE_ATTRIB] == "AssetCategory"
+    assert dicts[key]["label"] == "Screen GFX"
+    assert key in parents[1]

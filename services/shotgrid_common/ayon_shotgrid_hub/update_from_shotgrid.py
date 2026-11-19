@@ -38,6 +38,10 @@ from utils import (
     get_sg_entity_as_ay_dict,
     get_sg_entity_parent_field,
     get_reparenting_from_settings,
+    get_asset_category_fields,
+    get_asset_category_value,
+    should_apply_reparenting,
+    REPARENTING_SG_TYPES,
     update_ay_entity_custom_attributes,
     handle_comment,
     handle_reply,
@@ -91,7 +95,9 @@ def create_ay_entity_from_sg_event(
         sg_enabled_entities,
     )
 
-    extra_fields = [sg_parent_field]
+    category_fields = get_asset_category_fields(addon_settings)
+    extra_fields = _get_parent_query_fields(
+        sg_event["entity_type"], sg_parent_field, category_fields)
 
     sg_ay_dict = get_sg_entity_as_ay_dict(
         sg_session,
@@ -149,44 +155,48 @@ def create_ay_entity_from_sg_event(
 
     ay_parent_entity = None
     items_to_create = collections.deque()
-    while ay_parent_entity is None:
-        items_to_create.append(sg_ay_dict)
-        ay_parent_entity = _get_ayon_parent_entity(
-            ayon_entity_hub,
-            project_code_field,
-            sg_ay_dict,
-            sg_parent_field,
-            sg_project,
-            sg_session,
-            addon_settings
-        )
+    try:
+        while ay_parent_entity is None:
+            items_to_create.append(sg_ay_dict)
+            ay_parent_entity = _get_ayon_parent_entity(
+                ayon_entity_hub,
+                project_code_field,
+                sg_ay_dict,
+                sg_parent_field,
+                sg_project,
+                sg_session,
+                addon_settings,
+                sg_enabled_entities=sg_enabled_entities,
+            )
 
-        sg_parent = sg_ay_dict["data"].get(sg_parent_field)
-        if not ay_parent_entity and not sg_parent:
-            ay_parent_entity = ayon_entity_hub.project_entity
+            sg_parent = sg_ay_dict["data"].get(sg_parent_field)
+            if not ay_parent_entity and not sg_parent:
+                ay_parent_entity = ayon_entity_hub.project_entity
 
-        if not ay_parent_entity:
-            if sg_ay_dict["data"][sg_parent_field]["type"] == "Asset":
-                extra_field = "sg_asset_type"
-
-            else:
-                extra_field = get_sg_entity_parent_field(
+            if not ay_parent_entity:
+                # The linked parent is not in AYON yet: create it first.
+                parent_type = sg_parent["type"]
+                parent_parent_field = get_sg_entity_parent_field(
                     sg_session,
                     sg_project,
-                    sg_ay_dict["data"][sg_parent_field]["type"],
+                    parent_type,
                     sg_enabled_entities,
                 )
-
-            sg_ay_dict = get_sg_entity_as_ay_dict(
-                sg_session,
-                sg_ay_dict["data"][sg_parent_field]["type"],
-                sg_ay_dict["data"][sg_parent_field]["id"],
-                project_code_field,
-                default_task_type,
-                custom_attribs_map=custom_attribs_map,
-                extra_fields=[extra_field],
-            )
-            sg_parent_field = extra_field
+                sg_ay_dict = get_sg_entity_as_ay_dict(
+                    sg_session,
+                    parent_type,
+                    sg_parent["id"],
+                    project_code_field,
+                    default_task_type,
+                    custom_attribs_map=custom_attribs_map,
+                    extra_fields=_get_parent_query_fields(
+                        parent_type, parent_parent_field, category_fields),
+                )
+                sg_parent_field = parent_parent_field
+    except SkipSgEntity as exc:
+        log.warning(f"Not creating {sg_event['entity_type']} "
+                    f"<{sg_event['entity_id']}> in AYON yet: {exc}")
+        return None
 
     while items_to_create:
         sg_ay_dict = items_to_create.pop()
@@ -205,14 +215,16 @@ def create_ay_entity_from_sg_event(
             sg_parent_field,
             sg_project,
             sg_session,
-            addon_settings
+            addon_settings,
+            sg_enabled_entities=sg_enabled_entities,
         )
 
         ay_entity = create_new_ayon_entity(
             sg_session,
             ayon_entity_hub,
             ay_parent_entity,
-            sg_ay_dict
+            sg_ay_dict,
+            addon_settings=addon_settings,
         )
 
     return ay_entity
@@ -343,6 +355,62 @@ def sync_ay_entity_list_from_sg_event(
                 log.info("No matching AYON EntityList found for deletion.")
 
 
+class SkipSgEntity(Exception):
+    """The ShotGrid entity should not be created in AYON (yet)."""
+
+
+def _get_parent_query_fields(sg_type, sg_parent_field, category_fields):
+    """Extra fields to query to work out where `sg_type` goes in AYON."""
+    fields = []
+    if sg_parent_field and sg_parent_field != "project":
+        fields.append(sg_parent_field)
+    category_field = category_fields.get(sg_type)
+    if category_field and category_field["sg_field"] not in fields:
+        fields.append(category_field["sg_field"])
+    return fields
+
+
+def _get_or_create_asset_category(
+    ayon_entity_hub, sg_session, category, addon_settings
+):
+    """Find or create the AssetCategory folder for `category`."""
+    category_parent = ayon_entity_hub.project_entity
+    if should_apply_reparenting(
+        ayon_entity_hub, category_parent, addon_settings
+    ):
+        category_parent = get_reparenting_from_settings(
+            ayon_entity_hub,
+            {"folder_type": "AssetCategory"},
+            addon_settings,
+        ) or category_parent
+
+    name = slugify_string(category).lower()
+    for child in category_parent.children:
+        if (
+            child.folder_type == "AssetCategory"
+            and child.name.lower() == name
+        ):
+            return child
+
+    return create_new_ayon_entity(
+        sg_session,
+        ayon_entity_hub,
+        category_parent,
+        {
+            "folder_type": "AssetCategory",
+            "type": "AssetCategory",
+            "name": name,
+            "label": category,
+            "data": {CUST_FIELD_CODE_ID: name},
+            "attribs": {
+                SHOTGRID_ID_ATTRIB: name,
+                SHOTGRID_TYPE_ATTRIB: "AssetCategory"
+            }
+        },
+        addon_settings=addon_settings,
+    )
+
+
 def _get_ayon_parent_entity(
     ayon_entity_hub,
     project_code_field,
@@ -350,9 +418,22 @@ def _get_ayon_parent_entity(
     sg_parent_field,
     sg_project,
     sg_session,
-    addon_settings
+    addon_settings,
+    sg_enabled_entities=None,
 ):
     """Tries to find parent entity in AYON
+
+    Mirrors `get_sg_entities` used by the full project sync:
+
+    1. Linked to a ShotGrid parent entity (Tracking Settings) -> that
+       entity's AYON folder, or None when it is not in AYON yet so the
+       caller creates it first.
+    2. Otherwise, an 'AssetCategory fields' entry for the entity type ->
+       an AssetCategory folder named after the field value.
+    3. Otherwise the project.
+
+    Folder re-parenting settings are applied to whatever would otherwise
+    sit directly under the project.
 
     Args:
         ayon_entity_hub (ayon_api.entity_hub.EntityHub): The AYON EntityHub.
@@ -363,6 +444,11 @@ def _get_ayon_parent_entity(
         sg_session (shotgun_api3.Shotgun): The ShotGrid API session.
         addon_settings (Optional[dict]): A dictionary of Settings. Used to
             query location of custom folders (`shots`, `sequences`)
+        sg_enabled_entities (Optional[list[str]]): Synced entity types.
+
+    Raises:
+        SkipSgEntity: The entity's AssetCategory field is empty and the
+            settings say to skip it until it is filled in.
 
     Returns:
         ay_entity (ayon_api.entity_hub.EntityHub.Entity):
@@ -373,80 +459,63 @@ def _get_ayon_parent_entity(
 
     shotgrid_type = sg_ay_dict["attribs"][SHOTGRID_TYPE_ATTRIB]
     sg_parent = sg_ay_dict["data"].get(sg_parent_field)
-    ay_parent_entity = None
+    category_field = get_asset_category_fields(
+        addon_settings).get(shotgrid_type)
 
-    if shotgrid_type in ("Shot", "Sequence", "Episode", "Asset"):
+    linked_parent = (
+        sg_parent
+        if isinstance(sg_parent, dict) and sg_parent.get("id")
+        else None
+    )
+    if linked_parent and (
+        not category_field
+        or sg_enabled_entities is None
+        or linked_parent["type"] in sg_enabled_entities
+    ):
+        # Find parent entity ID
+        sg_parent_entity_dict = get_sg_entity_as_ay_dict(
+            sg_session,
+            linked_parent["type"],
+            linked_parent["id"],
+            project_code_field,
+            default_task_type,
+        )
+
+        log.debug(f"ShotGrid Parent entity: {sg_parent_entity_dict}")
+        return ayon_entity_hub.get_or_query_entity_by_id(
+            sg_parent_entity_dict["data"].get(CUST_FIELD_CODE_ID),
+            [
+                (
+                    "task"
+                    if sg_parent_entity_dict["type"] == "task"
+                    else "folder"
+                )
+            ],
+        )
+
+    if category_field:
+        category = get_asset_category_value(
+            sg_ay_dict["data"].get(category_field["sg_field"]))
+        if category:
+            return _get_or_create_asset_category(
+                ayon_entity_hub, sg_session, category, addon_settings)
+        if category_field["skip_when_empty"]:
+            raise SkipSgEntity(
+                f"field '{category_field['sg_field']}' is empty")
+
+    # Parent is the project, unless re-parenting settings move it.
+    log.debug(f"ShotGrid Parent is the Project: {sg_project}")
+    ay_parent_entity = ayon_entity_hub.project_entity
+    if (
+        shotgrid_type in REPARENTING_SG_TYPES
+        and should_apply_reparenting(
+            ayon_entity_hub, ay_parent_entity, addon_settings)
+    ):
         ay_parent_entity = get_reparenting_from_settings(
             ayon_entity_hub,
             sg_ay_dict,
             addon_settings
-        )
-
-        # Reparenting Asset under an AssetCategory ?
-        # if sg_asset_type is defined in the data, that's because
-        # the Asset needs to be parented to the AssetCategory.
-        sg_asset_type = sg_ay_dict["data"].get("sg_asset_type")
-        if (
-            shotgrid_type == "Asset"
-            and sg_asset_type
-        ):
-            name = slugify_string(sg_asset_type)
-            ay_parent_entity = ay_parent_entity or ayon_entity_hub.project_entity
-            # Gather or create AssetCategory parent.
-            for child in ay_parent_entity.children:
-                if (
-                    child.folder_type == "AssetCategory"
-                    and child.name.lower() == name.lower()
-                ):
-                    ay_parent_entity = child
-                    break
-            else:
-                ay_parent_entity = create_new_ayon_entity(
-                    sg_session,
-                    ayon_entity_hub,
-                    ay_parent_entity,
-                    {
-                        "folder_type": "AssetCategory",
-                        "type": "AssetCategory",
-                        "name": name.lower(),
-                        "label": sg_asset_type,
-                        "data": {CUST_FIELD_CODE_ID: name},
-                        "attribs": {
-                            SHOTGRID_ID_ATTRIB: name.lower(),
-                            SHOTGRID_TYPE_ATTRIB: "AssetCategory"
-                        }
-                    },
-                )
-
-    if ay_parent_entity is None:
-        # INFO: Parent entity might not be added in SG so this needs to
-        # be handled with optional way.
-        if not isinstance(sg_parent, dict):  # None (project) or str (AssetCategory)
-            # Parent is the project
-            log.debug(f"ShotGrid Parent is the Project: {sg_project}")
-            ay_parent_entity = ayon_entity_hub.project_entity
-
-        else:
-            # Find parent entity ID
-            sg_parent_entity_dict = get_sg_entity_as_ay_dict(
-                sg_session,
-                sg_parent["type"],
-                sg_parent["id"],
-                project_code_field,
-                default_task_type,
-            )
-
-            log.debug(f"ShotGrid Parent entity: {sg_parent_entity_dict}")
-            ay_parent_entity = ayon_entity_hub.get_or_query_entity_by_id(
-                sg_parent_entity_dict["data"].get(CUST_FIELD_CODE_ID),
-                [
-                    (
-                        "task"
-                        if sg_parent_entity_dict["type"] == "task"
-                        else "folder"
-                    )
-                ],
-            )
+        ) or ay_parent_entity
     return ay_parent_entity
 
 

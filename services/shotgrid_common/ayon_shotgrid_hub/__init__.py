@@ -284,6 +284,7 @@ class AyonShotgridHub:
                     self._sg,
                     self._sg_project,
                     self.sg_enabled_entities,
+                    addon_settings=self.settings,
                 )
                 self._ay_project.commit_changes()
 

@@ -17,8 +17,9 @@ from constants import (
 from utils import (
     create_new_ayon_entity,
     get_sg_entities,
-    get_sg_entity_parent_field,
     get_reparenting_from_settings,
+    should_apply_reparenting,
+    REPARENTING_SG_TYPES,
     update_ay_entity_custom_attributes, handle_comment,
 )
 
@@ -139,31 +140,11 @@ def match_shotgrid_hierarchy_in_ayon(
         # to avoid creating duplicates and erroring out
         if ay_entity is None:
 
-            sg_parent_field = get_sg_entity_parent_field(
-                sg_session,
-                sg_project,
-                shotgrid_type,
-                sg_enabled_entities,
-            )
-            # Assets are placed under their AssetCategory folder (built from
-            # 'sg_asset_type') whatever the Tracking Settings parent field is
-            # (e.g. a custom 'sg_asset_group'). The category itself is
-            # re-parented, so the asset must not be moved again.
-            asset_category_parent = (
-                sg_parent_field == "sg_asset_type"
-                or getattr(ay_parent_entity, "folder_type", None)
-                == "AssetCategory"
-            )
-
             if (
-                shotgrid_type == "Asset"
-                and asset_category_parent
+                shotgrid_type in REPARENTING_SG_TYPES
+                and should_apply_reparenting(
+                    entity_hub, ay_parent_entity, addon_settings)
             ):
-                # Parenting to AssetCategory is enabled.
-                # reparenting under already set parent (asset category folder).
-                log.debug("Reparenting %r under %r.", sg_ay_dict, ay_parent_entity)
-
-            elif shotgrid_type in ("Sequence", "Episode", "Shot", "AssetCategory", "Asset"):
                 ay_parent_entity = get_reparenting_from_settings(
                     entity_hub,
                     sg_ay_dict,
@@ -182,7 +163,8 @@ def match_shotgrid_hierarchy_in_ayon(
                 sg_session,
                 entity_hub,
                 ay_parent_entity,
-                sg_ay_dict
+                sg_ay_dict,
+                addon_settings=addon_settings,
             )
         else:
 

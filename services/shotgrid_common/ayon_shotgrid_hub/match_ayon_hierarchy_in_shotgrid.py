@@ -21,6 +21,7 @@ from utils import (
     get_sg_entities,
     get_sg_entity_as_ay_dict,
     get_sg_custom_attributes_data,
+    get_sg_entity_type,
     create_new_sg_entity,
     upload_ay_reviewable_to_sg,
     get_sg_statuses,
@@ -134,7 +135,10 @@ def match_ayon_hierarchy_in_shotgrid(
         # only sync folders with type in sg_enabled_entities and tasks
         if (
             ay_entity.entity_type == "folder"
-            and ay_entity.folder_type not in sg_enabled_entities
+            and (
+                get_sg_entity_type(ay_entity.folder_type, addon_settings)
+                or ay_entity.folder_type
+            ) not in sg_enabled_entities
         ):
             log.warning(
                 f"Entity '{ay_entity.name}' is not enabled in "

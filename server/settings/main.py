@@ -12,7 +12,12 @@ from ayon_server.settings.enum import (
 
 
 def default_shotgrid_entities():
-    """The entity types that exist in ShotGrid."""
+    """The entity types that exist in ShotGrid.
+
+    Project custom entities (CustomEntity01..CustomEntity50) are included so
+    studios can sync them as folders; use 'Folder type mapping' to give
+    them a readable AYON folder type.
+    """
     return [
         "Project",
         "Episode",
@@ -25,7 +30,7 @@ def default_shotgrid_entities():
         "Playlist",
         "Note",
         "Reply",
-    ]
+    ] + [f"CustomEntity{index:02d}" for index in range(1, 51)]
 
 
 def default_shotgrid_enabled_entities():
@@ -223,6 +228,52 @@ class FolderReparentingModel(BaseSettingsModel):
         title="Type grouping",
     )
 
+class FolderTypeMappingModel(BaseSettingsModel):
+    _layout = "compact"
+    sg_entity_type: str = SettingsField(
+        "",
+        title="ShotGrid entity type",
+        enum_resolver=default_shotgrid_entities,
+    )
+    ayon_folder_type: str = SettingsField(
+        "",
+        title="AYON folder type",
+        description="Folder type name used in AYON, e.g. 'MasterAsset'.",
+    )
+
+
+class AssetCategoryFieldModel(BaseSettingsModel):
+    _layout = "compact"
+    sg_entity_type: str = SettingsField(
+        "Asset",
+        title="ShotGrid entity type",
+        enum_resolver=default_shotgrid_entities,
+    )
+    sg_field: str = SettingsField(
+        "sg_asset_type",
+        title="ShotGrid field",
+        description="Field whose value names the AssetCategory folder.",
+    )
+    skip_when_empty: bool = SettingsField(
+        False,
+        title="Skip entity when empty",
+        description=(
+            "Do not sync the entity (and its children) while the field is "
+            "empty. Otherwise it is placed directly under the project."
+        ),
+    )
+
+
+def default_asset_category_fields():
+    return [
+        {
+            "sg_entity_type": "Asset",
+            "sg_field": "sg_asset_type",
+            "skip_when_empty": False,
+        },
+    ]
+
+
 class ShotgridCompatibilitySettings(BaseSettingsModel):
     """Settings to define relationships between ShotGrid and AYON."""
 
@@ -276,6 +327,38 @@ class ShotgridCompatibilitySettings(BaseSettingsModel):
         default_factory=FolderReparentingModel,
         description=("Parent folders for AYON folders matching to SG types."),
     )
+
+    folder_type_mapping: list[FolderTypeMappingModel] = SettingsField(
+        title="Folder type mapping",
+        default_factory=list,
+        description=(
+            "AYON folder type to use for a ShotGrid entity type. Entity "
+            "types not listed keep their ShotGrid name (Shot -> Shot)."
+        ),
+    )
+
+    asset_category_fields: list[AssetCategoryFieldModel] = SettingsField(
+        title="AssetCategory fields",
+        default_factory=default_asset_category_fields,
+        description=(
+            "Group entities under an 'AssetCategory' folder named after a "
+            "field value, when they are not linked to a synced parent "
+            "entity (see the project's Tracking Settings)."
+        ),
+    )
+
+    @validator("folder_type_mapping")
+    def ensure_unique_folder_type_mapping(cls, value):
+        sg_types = [entry.sg_entity_type for entry in value]
+        ay_types = [entry.ayon_folder_type for entry in value]
+        for label, names in (("ShotGrid entity type", sg_types),
+                             ("AYON folder type", ay_types)):
+            duplicates = {n for n in names if names.count(n) > 1}
+            if duplicates:
+                raise BadRequestException(
+                    f"Duplicate {label} in folder type mapping: "
+                    + ", ".join(sorted(duplicates)))
+        return value
 
 
 class MoviePathProfile(BaseSettingsModel):
