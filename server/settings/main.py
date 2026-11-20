@@ -436,6 +436,17 @@ class ShotgridSettings(BaseSettingsModel):
         example="sg_code",
         scope=["studio"],
     )
+    user_login_strip_email_domain: bool = SettingsField(
+        default=False,
+        title="Strip email domain from user logins",
+        description=(
+            "When syncing users, a ShotGrid login that is an email address "
+            "('jane.doe@studio.com') becomes the AYON user 'jane.doe' "
+            "instead of 'jane.doe_studio.com'. Users the sync already "
+            "created with the old name are renamed on the next user sync."
+        ),
+        scope=["studio"],
+    )
     enable_shotgrid_local_storage: bool = SettingsField(
         default=True,
         title="Enable ShotGrid Local Storage.",

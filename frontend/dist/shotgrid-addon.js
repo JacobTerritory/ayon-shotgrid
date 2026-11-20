@@ -159,18 +159,43 @@ const syncUsers = async () => {
   call_result_paragraph.innerHTML = "Processing users...";
 
   let successful_users = [];
+  let renamed_users = [];
   let failed_users = [];
+  const ayonUserNames = new Set(ayonUsers.map(user => user.name));
 
   for (const sg_user of sgUsers) {
     const ayonUser = await getAyonUserFromShotgridId(sg_user.id);
 
-    // If user is already linked by ID, we skip them entirely
+    // If user is already linked by ID, we skip them, unless the sync
+    // created them with an email-style name ('name_domain.com') and
+    // email domains are now stripped: then rename them to match.
     if (typeof ayonUser === "string" && ayonUser.trim() !== "") {
+      const expected = validateLogin(sg_user.login);
+      if (
+        stripLoginEmailDomain()
+        && ayonUser === legacyLogin(sg_user.login)
+        && ayonUser !== expected
+      ) {
+        if (ayonUserNames.has(expected)) {
+          failed_users.push(
+            `${sg_user.name} (cannot rename '${ayonUser}': '${expected}' already exists)`
+          );
+          continue;
+        }
+        const renamed = await renameUserInAyon(ayonUser, expected);
+        if (renamed.success) {
+          ayonUserNames.delete(ayonUser);
+          ayonUserNames.add(expected);
+          renamed_users.push(`${ayonUser} -> ${expected}`);
+        } else {
+          failed_users.push(`${sg_user.name} (rename failed: ${renamed.error})`);
+        }
+      }
       continue;
     }
 
     let ay_fixed_login = validateLogin(sg_user.login);
-    let login_already_exists = ayonUsers.some(user => user.name === ay_fixed_login);
+    let login_already_exists = ayonUserNames.has(ay_fixed_login);
 
     let result;
     if (login_already_exists) {
@@ -183,6 +208,7 @@ const syncUsers = async () => {
 
     if (result.success) {
       successful_users.push(sg_user.name);
+      ayonUserNames.add(ay_fixed_login);
     } else {
       failed_users.push(`${sg_user.name} (${result.error})`);
     }
@@ -195,11 +221,19 @@ const syncUsers = async () => {
     outputHtml += `<div style="color: #4caf50; margin-bottom: 8px;"><b>Added/Updated:</b> ${successful_users.join(", ")}</div>`;
   }
 
+  if (renamed_users.length > 0) {
+    outputHtml += `<div style="color: #4caf50; margin-bottom: 8px;"><b>Renamed:</b> ${renamed_users.join(", ")}</div>`;
+  }
+
   if (failed_users.length > 0) {
     outputHtml += `<div style="color: #f44336;"><b>Failed:</b><br/>${failed_users.join("<br/>")}</div>`;
   }
 
-  if (successful_users.length === 0 && failed_users.length === 0) {
+  if (
+    successful_users.length === 0
+    && renamed_users.length === 0
+    && failed_users.length === 0
+  ) {
     outputHtml = "All users are already synced.";
   }
 
@@ -313,9 +347,24 @@ const getAyonUsers = async () => {
     return ayonUsersConformed
 }
 
+function stripLoginEmailDomain() {
+  return Boolean(addonSettings && addonSettings.user_login_strip_email_domain);
+}
+
+function legacyLogin(login) {
+  // AYON name the user sync produced before email domains could be stripped.
+  return login.replace(/@/g, '_');
+}
+
 function validateLogin(login) {
-  // First sanitize by replacing @ with underscore
-  let new_login = login.replace(/@/g, '_');
+  // Email-style logins ('jane.doe@studio.com'): either keep only the part
+  // before '@' (setting 'Strip email domain from user logins') or replace
+  // '@' with '_', since '@' is not allowed in AYON user names.
+  let new_login = login;
+  if (stripLoginEmailDomain() && new_login.includes('@')) {
+    new_login = new_login.split('@')[0];
+  }
+  new_login = new_login.replace(/@/g, '_');
 
   // Ensure valid pattern
   const validPattern = /^[a-zA-Z0-9][a-zA-Z0-9_\.\-]*[a-zA-Z0-9]$/;
@@ -324,17 +373,40 @@ function validateLogin(login) {
     // If invalid, create valid string by:
     // 1. Remove invalid chars
     // 2. Ensure starts/ends with alphanumeric
-    let _new_login = new_login.replace(/[^a-zA-Z0-9_\.\-]/g, '')
+    new_login = new_login.replace(/[^a-zA-Z0-9_\.\-]/g, '')
       .replace(/^[^a-zA-Z0-9]+/, '')
       .replace(/[^a-zA-Z0-9]+$/, '');
 
-    // If result too short, append 'user'
-    if (_new_login.length < 2) {
-      new_login = 'user' + _new_login;
+    // If result too short, prefix with 'user'
+    if (new_login.length < 2) {
+      new_login = 'user' + new_login;
     }
   }
 
   return new_login;
+}
+
+const renameUserInAyon = async (oldName, newName) => {
+  const url = "/api/users/" + encodeURIComponent(oldName) + "/rename";
+  try {
+    try {
+      await ayonAPI.post(url, { "name": newName });
+    } catch (error) {
+      // Older servers only have the deprecated PATCH endpoint.
+      if (!error.response || ![404, 405].includes(error.response.status)) {
+        throw error;
+      }
+      await ayonAPI.patch(url, { "newName": newName });
+    }
+    return { success: true };
+  } catch (error) {
+    let message = error.message;
+    if (error.response && error.response.data) {
+      message = error.response.data.detail || JSON.stringify(error.response.data);
+    }
+    console.log("Error renaming user in AYON:", message);
+    return { success: false, error: message };
+  }
 }
 
 const updateUserInAyon = async (id, login) => {
